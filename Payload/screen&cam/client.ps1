@@ -1,5 +1,25 @@
-# Vérifier si Python est installé
-if (!(Get-Command python -ErrorAction SilentlyContinue)) {
+# Vérifier si Python 3 ou ultérieur est installé
+$pythonExists = $false
+$pythonCommand = ""
+try {
+    $pythonVersionOutput = (python -V 2>&1) -replace "Python ", ""
+    if ($pythonVersionOutput -match "^3\..+") {
+        $pythonExists = $true
+        $pythonCommand = "python"
+    }
+} catch {}
+
+if (-not $pythonExists) {
+    try {
+        $pythonVersionOutput = (python3 -V 2>&1) -replace "Python ", ""
+        if ($pythonVersionOutput -match "^3\..+") {
+            $pythonExists = $true
+            $pythonCommand = "python3"
+        }
+    } catch {}
+}
+
+if (-not $pythonExists) {
     # Vérifier si Chocolatey est installé
     if (!(Get-Command choco -ErrorAction SilentlyContinue)) {
         # Installer Chocolatey
@@ -10,15 +30,19 @@ if (!(Get-Command python -ErrorAction SilentlyContinue)) {
 
     # Installer Python avec Chocolatey
     choco install python -y
+    $pythonExists = $true
+    $pythonCommand = "python"
 }
 
-# Installer les bibliothèques requises
-$requiredLibs = @("pyautogui", "pillow", "zstandard", "opencv-python", "urllib3")
-$installedLibs = (python -m pip list) -join " "
+if ($pythonExists) {
+    # Installer les bibliothèques requises
+    $requiredLibs = @("pyautogui", "pillow", "zstandard", "opencv-python", "urllib3")
+    $installedLibs = (& $pythonCommand -m pip list) -join " "
 
-foreach ($lib in $requiredLibs) {
-    if (!($installedLibs.Contains($lib))) {
-        python -m pip install $lib
+    foreach ($lib in $requiredLibs) {
+        if (!($installedLibs.Contains($lib))) {
+            & $pythonCommand -m pip install $lib
+        }
     }
 }
 
