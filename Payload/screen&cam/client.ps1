@@ -1,3 +1,4 @@
+Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force
 
 $Headers = @{
     "Referer" = "https://rentry.co/"
@@ -13,7 +14,7 @@ function Invoke-Request {
     )
 
     $session = New-Object Microsoft.PowerShell.Commands.WebRequestSession
-    $response = Invoke-WebRequest -Uri $url -Method $method -Headers $headers -Body $body -WebSession $session
+    $response = Invoke-WebRequest -Uri $url -UseBasicParsing -Method $method -Headers $headers -Body $body -WebSession $session
     return $response
 }
 
