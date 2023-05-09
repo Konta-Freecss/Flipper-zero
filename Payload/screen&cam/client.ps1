@@ -32,7 +32,7 @@ function Get-Raw {
 
 #-----------------------------
 
-#Install-Module -Name ThreadJob -RequiredVersion 2.0.0 -force
+Install-Module -Name ThreadJob -RequiredVersion 2.0.0 -force
 
 Add-Type -TypeDefinition @"
     using System;
